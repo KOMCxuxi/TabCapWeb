@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="zh-Hant">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>TabCap · 動態譜 PDF 擷取器（純前端版）</title>
+  <meta name="description"
+    content="TabCap 純前端版：在瀏覽器裡把動態譜影片／圖片的畫面截圖、去重、依小節線排版，匯出 PDF／長圖／psz。所有處理都在本機完成，不需要後端。">
+  <meta name="theme-color" content="#176b5b">
+  <meta name="color-scheme" content="light">
+
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" type="image/png" sizes="32x32" href="./assets/favicon-32.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="./assets/apple-touch-icon-180.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="TabCap">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+
+<body>
+  <main id="app" class="app-shell" data-stage="1">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">T</span>
+        <div class="brand-text">
+          <h1 class="brand-name">TabCap</h1>
+          <p class="brand-tagline">動態譜 PDF 擷取器 <span class="brand-badge">純前端版</span></p>
+        </div>
+      </div>
+      <div class="topbar-side">
+        <nav id="stepper" class="stepper" aria-label="流程步驟">
+          <ol class="stepper-list">
+            <li data-step="1" class="is-active" aria-current="step"><span class="stepper-num">1</span>匯入</li>
+            <li data-step="2"><span class="stepper-num">2</span>截圖</li>
+            <li data-step="3"><span class="stepper-num">3</span>調整</li>
+            <li data-step="4"><span class="stepper-num">4</span>排版</li>
+          </ol>
+        </nav>
+        <button id="installButton" class="btn btn-ghost install-button hidden" type="button">安裝到主畫面</button>
+      </div>
+    </header>
+
+    <div id="offlineBanner" class="offline-banner hidden" role="status" aria-live="polite">
+      <span class="offline-dot" aria-hidden="true"></span>
+      <span>目前處於離線狀態：頁面殼仍可開啟，但匯入新檔案與部分功能可能受限。</span>
+    </div>
+
+    <!-- ============ 第 1 步：匯入 ============ -->
+    <section id="step1" class="step panel" data-step="1" aria-labelledby="step1Title">
+      <div class="step-head">
+        <span class="step-kicker">第 1 步</span>
+        <h2 id="step1Title" class="step-title">匯入來源</h2>
+        <p class="step-desc">選一段本地影片或圖片，或擷取正在播放的分頁／螢幕畫面。</p>
+      </div>
+
+      <div class="import-grid">
+        <div class="import-main">
+          <div id="dropZone" class="drop-zone" role="button" tabindex="0"
+            aria-label="拖放或點擊選擇影片或圖片檔案">
+            <span class="drop-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="38" height="38" fill="none" stroke="currentColor" stroke-width="1.7"
+                stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v3.5A2.5 2.5 0 0 1 18.5 21h-13A2.5 2.5 0 0 1 3 18.5V15"></path>
+                <path d="M12 3v12"></path>
+                <path d="m7 8 5-5 5 5"></path>
+              </svg>
+            </span>
+            <p class="drop-title">把影片或圖片拖到這裡</p>
+            <p class="drop-sub">或點此選擇檔案 · 支援 mp4 / webm / mov / mkv、png / jpg / webp / gif</p>
+          </div>
+          <input id="fileInput" class="sr-only" type="file"
+            accept="video/mp4,video/webm,video/quicktime,video/x-matroska,video/x-m4v,video/*,image/png,image/jpeg,image/webp,image/bmp,image/gif,image/*"
+            aria-label="選擇影片或圖片檔案" autocomplete="off">
+
+          <div class="action-row">
+            <button id="importButton" class="btn btn-primary" type="button">匯入檔案</button>
+          </div>
+
+          <p id="importStatus" class="status" role="status" aria-live="polite"></p>
+          <div id="sourceInfo" class="source-info" aria-live="polite"></div>
+        </div>
+
+        <aside class="import-side">
+          <div class="capture-card">
+            <h3 class="capture-title">從分頁／螢幕擷取</h3>
+            <p class="capture-desc">先在瀏覽器播放影片，再按下方按鈕分享「這個分頁」。純前端無法貼連結下載，這是處理線上影片的唯一方式。</p>
+            <button id="screenCaptureButton" class="btn btn-secondary btn-block" type="button">擷取分頁／螢幕</button>
+            <p id="screenCaptureHint" class="hint">支援桌面版 Chrome／Edge。iOS Safari 沒有螢幕擷取，請先螢幕錄影，再匯入本地影片檔。</p>
+          </div>
+          <p id="serverNote" class="server-note">貼上 YouTube／B 站連結自動下載需要伺服器版；靜態版請改用「螢幕擷取」或先錄影再匯入本地檔案。</p>
+        </aside>
+      </div>
+    </section>
+
+    <!-- ============ 第 2 步：截圖 ============ -->
+    <section id="step2" class="step panel hidden" data-step="2" aria-labelledby="step2Title">
+      <div class="step-head">
+        <span class="step-kicker">第 2 步</span>
+        <h2 id="step2Title" class="step-title">截圖</h2>
+        <p class="step-desc">設定時間範圍與抽幀參數，確認預覽畫面後開始抽幀。</p>
+      </div>
+
+      <div class="preview-wrap">
+        <canvas id="previewCanvas" class="preview-canvas" width="960" height="540" aria-label="畫面預覽"></canvas>
+        <p id="previewHint" class="hint">匯入來源後，這裡會顯示目前時間點的畫面。</p>
+      </div>
+
+      <div class="settings-group">
+        <h3 class="group-title">時間範圍</h3>
+        <div class="time-range">
+          <div class="field">
+            <span class="field-label">開始時間</span>
+            <div class="time-inputs">
+              <input id="startMinInput" class="num" type="number" min="0" step="1" value="0" inputmode="numeric"
+                aria-label="開始分鐘" autocomplete="off">
+              <span class="unit">分</span>
+              <input id="startSecInput" class="num" type="number" min="0" max="59" step="1" value="0"
+                inputmode="numeric" aria-label="開始秒" autocomplete="off">
+              <span class="unit">秒</span>
+            </div>
+          </div>
+          <div class="field">
+            <span class="field-label">結束時間</span>
+            <div class="time-inputs">
+              <input id="endMinInput" class="num" type="number" min="0" step="1" value="0" inputmode="numeric"
+                aria-label="結束分鐘" autocomplete="off">
+              <span class="unit">分</span>
+              <input id="endSecInput" class="num" type="number" min="0" max="59" step="1" value="10"
+                inputmode="numeric" aria-label="結束秒" autocomplete="off">
+              <span class="unit">秒</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-group">
+        <h3 class="group-title">抽幀與去重</h3>
+        <div class="form-grid">
+          <label class="field" for="sampleEveryInput">
+            <span class="field-label">採樣間隔（秒）</span>
+            <input id="sampleEveryInput" type="number" min="0.5" step="0.5" value="2" inputmode="decimal"
+              autocomplete="off">
+          </label>
+          <label class="field" for="diffThresholdInput">
+            <span class="field-label">差異閾值（0–1）</span>
+            <input id="diffThresholdInput" type="number" min="0" max="1" step="0.001" value="0.01"
+              inputmode="decimal" autocomplete="off">
+          </label>
+          <label class="field" for="bandHalfWidthInput">
+            <span class="field-label">播放頭條帶半寬（px）</span>
+            <input id="bandHalfWidthInput" type="number" min="1" step="1" value="90" inputmode="numeric"
+              autocomplete="off">
+          </label>
+          <label class="field" for="compareWindowInput">
+            <span class="field-label">比較窗口（張）</span>
+            <input id="compareWindowInput" type="number" min="1" step="1" value="1" inputmode="numeric"
+              autocomplete="off">
+          </label>
+        </div>
+      </div>
+
+      <div class="settings-group">
+        <h3 class="group-title">抽幀前裁切</h3>
+        <p class="hint">以百分比表示：0% 代表不裁切該側，100% 代表保留到最右／最下。</p>
+        <div class="form-grid crop-form">
+          <div class="field range-field">
+            <div class="range-head">
+              <span class="field-label">左邊界</span>
+              <span class="range-value" id="cropLeftValue">0%</span>
+            </div>
+            <input id="cropLeftInput" type="range" min="0" max="100" step="1" value="0" aria-label="左邊界百分比"
+              autocomplete="off">
+          </div>
+          <div class="field range-field">
+            <div class="range-head">
+              <span class="field-label">右邊界</span>
+              <span class="range-value" id="cropRightValue">100%</span>
+            </div>
+            <input id="cropRightInput" type="range" min="0" max="100" step="1" value="100" aria-label="右邊界百分比"
+              autocomplete="off">
+          </div>
+          <div class="field range-field">
+            <div class="range-head">
+              <span class="field-label">上邊界</span>
+              <span class="range-value" id="cropTopValue">0%</span>
+            </div>
+            <input id="cropTopInput" type="range" min="0" max="100" step="1" value="0" aria-label="上邊界百分比"
+              autocomplete="off">
+          </div>
+          <div class="field range-field">
+            <div class="range-head">
+              <span class="field-label">下邊界</span>
+              <span class="range-value" id="cropBottomValue">100%</span>
+            </div>
+            <input id="cropBottomInput" type="range" min="0" max="100" step="1" value="100" aria-label="下邊界百分比"
+              autocomplete="off">
+          </div>
+        </div>
+      </div>
+
+      <div class="action-row action-row-main">
+        <button id="generateButton" class="btn btn-primary" type="button">開始抽幀</button>
+      </div>
+      <div class="progress-row">
+        <progress id="captureProgress" class="progress" max="100" value="0" aria-label="抽幀進度"></progress>
+        <span id="captureProgressText" class="progress-text" role="status" aria-live="polite">尚未開始</span>
+      </div>
+    </section>
+
+    <!-- ============ 第 3 步：調整 ============ -->
+    <section id="step3" class="step panel hidden" data-step="3" aria-labelledby="step3Title">
+      <div class="step-head">
+        <span class="step-kicker">第 3 步</span>
+        <h2 id="step3Title" class="step-title">調整截圖</h2>
+        <p class="step-desc">檢查每張截圖的裁切範圍與小節線；不需要的可以隱藏或刪除。</p>
+      </div>
+
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <button id="backToStep2Button" class="btn btn-ghost" type="button">上一步：截圖</button>
+          <button id="autoMeasuresButton" class="btn btn-secondary" type="button">自動偵測小節線</button>
+          <label class="checkbox" for="showHiddenCheckbox">
+            <input id="showHiddenCheckbox" type="checkbox" checked autocomplete="off">
+            <span>顯示已隱藏的截圖</span>
+          </label>
+        </div>
+        <button id="toLayoutButton" class="btn btn-primary" type="button">下一步：排版</button>
+      </div>
+
+      <div id="cards" class="cards" aria-live="polite"></div>
+      <p id="cardsEmpty" class="empty-hint">還沒有截圖。請先回到第 2 步產生截圖。</p>
+    </section>
+
+    <!-- ============ 第 4 步：排版 ============ -->
+    <section id="step4" class="step panel hidden" data-step="4" aria-labelledby="step4Title">
+      <div class="step-head">
+        <span class="step-kicker">第 4 步</span>
+        <h2 id="step4Title" class="step-title">排版與匯出</h2>
+        <p class="step-desc">設定標題、紙張與間距；預覽沒問題後下載 PDF、長圖或 .psz。</p>
+      </div>
+
+      <div class="layout-grid">
+        <label class="field field-wide" for="titleArea">
+          <span class="field-label">標題（第一行標題，第二行可放作者／來源）</span>
+          <textarea id="titleArea" rows="3" placeholder="例如：晴天｜周杰倫" autocomplete="off"></textarea>
+        </label>
+
+        <label class="field" for="marginInput">
+          <span class="field-label">頁邊距（px）</span>
+          <input id="marginInput" type="number" min="0" max="200" step="1" value="40" inputmode="numeric"
+            autocomplete="off">
+        </label>
+        <label class="field" for="spacingInput">
+          <span class="field-label">行間距（px）</span>
+          <input id="spacingInput" type="number" min="0" max="120" step="1" value="25" inputmode="numeric"
+            autocomplete="off">
+        </label>
+        <label class="field" for="scaleInput">
+          <span class="field-label">縮放（%，100 = 原始大小）</span>
+          <input id="scaleInput" type="number" min="30" max="300" step="5" value="100" inputmode="numeric"
+            autocomplete="off">
+        </label>
+
+        <div class="field">
+          <span class="field-label">紙張方向</span>
+          <div class="segmented" role="group" aria-label="紙張方向">
+            <button id="orientationPortrait" class="seg-btn" type="button" aria-pressed="true">直式</button>
+            <button id="orientationLandscape" class="seg-btn" type="button" aria-pressed="false">橫式</button>
+          </div>
+        </div>
+
+        <label class="field" for="alignSelect">
+          <span class="field-label">水平對齊</span>
+          <select id="alignSelect" autocomplete="off">
+            <option value="left" selected>靠左</option>
+            <option value="center">置中</option>
+            <option value="right">靠右</option>
+          </select>
+        </label>
+        <label class="field" for="valignSelect">
+          <span class="field-label">垂直對齊</span>
+          <select id="valignSelect" autocomplete="off">
+            <option value="top" selected>靠上</option>
+            <option value="center">置中</option>
+            <option value="bottom">靠下</option>
+          </select>
+        </label>
+
+        <label class="field" for="bgColorInput">
+          <span class="field-label">背景顏色</span>
+          <input id="bgColorInput" type="color" value="#ffffff" autocomplete="off">
+        </label>
+        <label class="field" for="textColorInput">
+          <span class="field-label">文字顏色</span>
+          <input id="textColorInput" type="color" value="#111111" autocomplete="off">
+        </label>
+
+        <div class="field field-wide">
+          <span class="field-label">影像處理</span>
+          <div class="checkbox-row">
+            <label class="checkbox checkbox-inline" for="binarizeCheckbox">
+              <input id="binarizeCheckbox" type="checkbox" autocomplete="off">
+              <span>二值化（黑白）</span>
+            </label>
+            <label class="checkbox checkbox-inline" for="invertCheckbox">
+              <input id="invertCheckbox" type="checkbox" autocomplete="off">
+              <span>反色</span>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <div class="toolbar toolbar-export">
+        <button id="backToStep3Button" class="btn btn-ghost" type="button">上一步：調整截圖</button>
+        <div class="export-buttons">
+          <button id="downloadPdfButton" class="btn btn-primary" type="button">下載 PDF</button>
+          <button id="downloadLongButton" class="btn btn-secondary" type="button">下載長圖</button>
+          <button id="downloadPszButton" class="btn btn-secondary" type="button">下載 .psz</button>
+        </div>
+      </div>
+
+      <div class="progress-row">
+        <progress id="layoutProgress" class="progress" max="100" value="0" aria-label="排版進度"></progress>
+        <span id="layoutProgressText" class="progress-text" role="status" aria-live="polite">尚未排版</span>
+      </div>
+
+      <div id="pageList" class="page-list"></div>
+    </section>
+
+    <footer class="footer">
+      <p>TabCap 純前端版 · 所有處理都在你的瀏覽器完成，檔案不會上傳到任何伺服器。</p>
+    </footer>
+  </main>
+
+  <div id="toastHost" class="toast-host" role="status" aria-live="polite" aria-atomic="false"></div>
+
+  <noscript>
+    <p class="noscript">此工具需要 JavaScript 才能運作，請在瀏覽器設定中開啟。</p>
+  </noscript>
+
+  <!-- 載入順序固定：vendor → UI → 引擎 → app.js。全部用 defer，缺檔時只會 404，不會白屏。 -->
+  <script src="./vendor/jszip.min.js" defer></script>
+  <script src="./vendor/pdf-lib.min.js" defer></script>
+  <script src="./js/ui.js" defer></script>
+  <script src="./js/media.js" defer></script>
+  <script src="./js/capture.js" defer></script>
+  <script src="./js/image.js" defer></script>
+  <script src="./js/layout.js" defer></script>
+  <script src="./js/export.js" defer></script>
+  <script src="./app.js" defer></script>
+</body>
+
+</html>
