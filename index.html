@@ -978,6 +978,13 @@ input[type="checkbox"] {
   min-width: 0;
 }
 
+.preview-stage {
+  position: relative;
+  width: 100%;
+  cursor: crosshair;
+  touch-action: none;
+}
+
 .preview-canvas {
   display: block;
   width: 100%;
@@ -985,6 +992,15 @@ input[type="checkbox"] {
   border: 1px solid #26332d;
   border-radius: var(--radius);
   background: #101715;
+}
+
+.crop-box {
+  position: absolute;
+  border: 2px solid #f4c542;
+  background: rgba(244, 197, 66, 0.12);
+  box-shadow: 0 0 0 9999px rgba(8, 12, 10, 0.45);
+  pointer-events: none;
+  border-radius: 2px;
 }
 
 /* ==========================================================================
@@ -1834,8 +1850,11 @@ input[type="checkbox"] {
       </div>
 
       <div class="preview-wrap">
-        <canvas id="previewCanvas" class="preview-canvas" width="960" height="540" aria-label="畫面預覽"></canvas>
-        <p id="previewHint" class="hint">匯入來源後，這裡會顯示目前時間點的畫面。</p>
+        <div id="previewStage" class="preview-stage">
+          <canvas id="previewCanvas" class="preview-canvas" width="960" height="540" aria-label="畫面預覽，可拖曳框選樂譜範圍"></canvas>
+          <div id="cropBox" class="crop-box" hidden></div>
+        </div>
+        <p id="previewHint" class="hint">在預覽上按住拖曳，框出只要截的樂譜。框外（影片、字幕、黑邊）不會進 PDF。</p>
       </div>
 
       <div class="settings-group">
@@ -1871,7 +1890,7 @@ input[type="checkbox"] {
         <div class="form-grid">
           <label class="field" for="sampleEveryInput">
             <span class="field-label">採樣間隔（秒）</span>
-            <input id="sampleEveryInput" type="number" min="0.5" step="0.5" value="2" inputmode="decimal"
+            <input id="sampleEveryInput" type="number" min="0.2" step="0.1" value="0.5" inputmode="decimal"
               autocomplete="off">
           </label>
           <label class="field" for="diffThresholdInput">
@@ -1945,13 +1964,12 @@ input[type="checkbox"] {
       <div class="step-head">
         <span class="step-kicker">第 3 步</span>
         <h2 id="step3Title" class="step-title">調整截圖</h2>
-        <p class="step-desc">檢查每張截圖的裁切範圍與小節線；不需要的可以隱藏或刪除。</p>
+        <p class="step-desc">翻頁式樂譜一頁一張，不用偵測小節線。不需要的可以隱藏或刪除。</p>
       </div>
 
       <div class="toolbar">
         <div class="toolbar-left">
           <button id="backToStep2Button" class="btn btn-ghost" type="button">上一步：截圖</button>
-          <button id="autoMeasuresButton" class="btn btn-secondary" type="button">自動偵測小節線</button>
           <label class="checkbox" for="showHiddenCheckbox">
             <input id="showHiddenCheckbox" type="checkbox" checked autocomplete="off">
             <span>顯示已隱藏的截圖</span>
@@ -1980,12 +1998,12 @@ input[type="checkbox"] {
 
         <label class="field" for="marginInput">
           <span class="field-label">頁邊距（px）</span>
-          <input id="marginInput" type="number" min="0" max="200" step="1" value="40" inputmode="numeric"
+          <input id="marginInput" type="number" min="0" max="240" step="1" value="48" inputmode="numeric"
             autocomplete="off">
         </label>
         <label class="field" for="spacingInput">
           <span class="field-label">行間距（px）</span>
-          <input id="spacingInput" type="number" min="0" max="120" step="1" value="25" inputmode="numeric"
+          <input id="spacingInput" type="number" min="0" max="240" step="1" value="96" inputmode="numeric"
             autocomplete="off">
         </label>
         <label class="field" for="scaleInput">
@@ -4512,11 +4530,103 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     return captures;
   }
 
+  /**
+   * 翻頁式影片：丟掉換頁中的過渡幀，只留「畫面停穩」的那一張。
+   * 相鄰兩幀差很小 = 同一頁停著；差變大再變小 = 翻了一頁。
+   * @returns {{kept:Array, stats:object}}
+   */
+  function settlePages(frames, params, options) {
+    var opts = options || {};
+    var onProgress = typeof opts.onProgress === "function" ? opts.onProgress : null;
+    var cfg = normalizeDedupeParams(params);
+    var stableMax = 0.012;
+    var changeMin = 0.028;
+    var total = frames && frames.length ? frames.length : 0;
+    var stats = { checked: total, kept: 0, blank: 0, transitions: 0, elapsedMs: 0 };
+    if (!total) return { kept: [], stats: stats };
+    var startedAt = nowMs();
+
+    function thumbOf(canvas) {
+      var fw = Math.max(1, canvas.width || 1);
+      var W = Math.max(16, Math.min(WORK_WIDTH, fw));
+      var H = Math.max(1, Math.round((canvas.height || 1) * (W / fw)));
+      var c = document.createElement("canvas");
+      c.width = W;
+      c.height = H;
+      var ctx = c.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(canvas, 0, 0, W, H);
+      var data = ctx.getImageData(0, 0, W, H).data;
+      var n = W * H;
+      var bin = new Uint8Array(n);
+      var ink = 0;
+      for (var i = 0, p = 0; i < n; i++, p += 4) {
+        var g = (data[p] * 77 + data[p + 1] * 150 + data[p + 2] * 29) >> 8;
+        bin[i] = g < INK_THRESHOLD ? 1 : 0;
+        ink += bin[i];
+      }
+      return { bin: bin, ink: ink / n, w: W, h: H };
+    }
+
+    function ratio(a, b) {
+      var n = Math.min(a.bin.length, b.bin.length);
+      if (!n) return 1;
+      var changed = 0;
+      for (var i = 0; i < n; i++) if (a.bin[i] !== b.bin[i]) changed += 1;
+      return changed / n;
+    }
+
+    var kept = [];
+    var prev = null;
+    var holding = null;
+    var holdThumb = null;
+    var pageThumb = null;
+    for (var i = 0; i < total; i++) {
+      var frame = frames[i];
+      var thumb = thumbOf(frame.canvas);
+      if (onProgress && (i % 4 === 0 || i === total - 1)) {
+        onProgress({ done: i + 1, total: total, phase: "settle" });
+      }
+      if (thumb.ink < 0.004) {
+        stats.blank += 1;
+        continue;
+      }
+      if (!holding) {
+        holding = frame;
+        holdThumb = thumb;
+        pageThumb = thumb;
+        continue;
+      }
+      var d = ratio(holdThumb, thumb);
+      if (d <= stableMax) {
+        holding = frame;
+        holdThumb = thumb;
+        continue;
+      }
+      if (d >= changeMin) {
+        if (!pageThumb || ratio(pageThumb, holdThumb) >= changeMin * 0.6) {
+          kept.push(holding);
+          pageThumb = holdThumb;
+        }
+        stats.transitions += 1;
+        holding = frame;
+        holdThumb = thumb;
+      }
+    }
+    if (holding && (!pageThumb || holding === frames[frames.length - 1] || ratio(pageThumb, holdThumb) >= changeMin * 0.45)) {
+      if (!kept.length || kept[kept.length - 1] !== holding) kept.push(holding);
+    }
+    if (!kept.length && holding) kept.push(holding);
+    stats.kept = kept.length;
+    stats.elapsedMs = round3(nowMs() - startedAt);
+    return { kept: kept, stats: stats };
+  }
+
   global.TabCapCapture = {
     version: API_VERSION,
     sampleVideo: sampleVideo,
     sampleLive: sampleLive,
     dedupe: dedupe,
+    settlePages: settlePages,
     framesToCaptures: framesToCaptures,
     // 給 UI 做輸入驗證用（契約沒要求，屬額外曝光）
     LIMITS: {
@@ -5031,12 +5141,13 @@ https://github.com/nodeca/pako/blob/main/LICENSE
 (function (global) {
   "use strict";
 
-  /* A4 @150dpi（1240×1754）。直式用原值，橫式互換。 */
-  var A4_WIDTH = 1240;
-  var A4_HEIGHT = 1754;
+  /* 與伺服器版成品對齊：1654×2339 px（A4@200dpi 像素）。
+     export.js 仍用 px×72/150，頁面點數正好是參考 PDF 的 793.92×1122.72。 */
+  var A4_WIDTH = 1654;
+  var A4_HEIGHT = 2339;
 
-  var DEFAULT_MARGIN = 40;
-  var DEFAULT_SPACING = 25;
+  var DEFAULT_MARGIN = 48;
+  var DEFAULT_SPACING = 96;
   var DEFAULT_SCALE = 1;
 
   /* 標題：字級 ≈ 頁寬 × 3.2%（1240px 頁寬 → 40px），1.35 倍行高；最小 12px。 */
@@ -6179,7 +6290,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     params2: {
       start: 0,
       end: 10,
-      sampleEvery: 2,
+      sampleEvery: 0.5,
       diffThreshold: 0.01,
       bandHalfWidth: 90,
       compareWindow: 1,
@@ -6188,8 +6299,8 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     captures: [],
     layout: {
       titleLines: ["", ""],
-      margin: 40,
-      spacing: 25,
+      margin: 48,
+      spacing: 96,
       scale: 1,
       orientation: "portrait",
       align: "left",
@@ -6250,6 +6361,54 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     setStage(2);
     await renderPreview(source.kind === "screen" ? 0 : state.params2.start);
     if (source.kind === "screen") startLivePreview();
+  }
+
+  function trimWhitespace(canvas) {
+    if (!canvas || !canvas.width || !canvas.height) return canvas;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return canvas;
+    const { width, height } = canvas;
+    let data;
+    try {
+      data = ctx.getImageData(0, 0, width, height).data;
+    } catch (_) {
+      return canvas;
+    }
+    const inkAt = (x, y) => {
+      const i = (y * width + x) * 4;
+      const g = (data[i] * 77 + data[i + 1] * 150 + data[i + 2] * 29) >> 8;
+      return g < 210;
+    };
+    let top = 0;
+    let bottom = height - 1;
+    let left = 0;
+    let right = width - 1;
+    const rowInk = (y) => {
+      let n = 0;
+      for (let x = 0; x < width; x += 2) if (inkAt(x, y)) n += 1;
+      return n;
+    };
+    const colInk = (x) => {
+      let n = 0;
+      for (let y = 0; y < height; y += 2) if (inkAt(x, y)) n += 1;
+      return n;
+    };
+    while (top < bottom && rowInk(top) < 3) top += 1;
+    while (bottom > top && rowInk(bottom) < 3) bottom -= 1;
+    while (left < right && colInk(left) < 2) left += 1;
+    while (right > left && colInk(right) < 2) right -= 1;
+    const pad = 6;
+    top = Math.max(0, top - pad);
+    left = Math.max(0, left - pad);
+    bottom = Math.min(height - 1, bottom + pad);
+    right = Math.min(width - 1, right + pad);
+    if (right - left < 8 || bottom - top < 8) return canvas;
+    if (top === 0 && left === 0 && bottom === height - 1 && right === width - 1) return canvas;
+    const out = document.createElement("canvas");
+    out.width = right - left + 1;
+    out.height = bottom - top + 1;
+    out.getContext("2d").drawImage(canvas, left, top, out.width, out.height, 0, 0, out.width, out.height);
+    return out;
   }
 
   function showLoadError(message) {
@@ -6359,12 +6518,20 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       return;
     }
     try {
-      const frame = await window.TabCapMedia.grabFrame(source, timeSec, { crop: cropParams() });
+      const frame = await window.TabCapMedia.grabFrame(source, timeSec, { crop: { l: 0, r: 1, t: 0, b: 1 } });
       const scale = Math.min(1, 1100 / Math.max(1, frame.width));
       canvas.width = Math.max(1, Math.round(frame.width * scale));
       canvas.height = Math.max(1, Math.round(frame.height * scale));
       canvas.getContext("2d").drawImage(frame, 0, 0, canvas.width, canvas.height);
-      if ($("previewHint")) $("previewHint").textContent = `預覽時間：${fmtSec(timeSec)}`;
+      if (!state.params2.cropTouched) {
+        const suggested = suggestPaperCrop(canvas);
+        if (suggested) {
+          state.params2.crop = suggested;
+          syncStep2Inputs();
+        }
+      }
+      paintCropBox();
+      if ($("previewHint")) $("previewHint").textContent = `預覽時間：${fmtSec(timeSec)}　拖曳黃框可改截取範圍`;
     } catch (err) {
       console.error(err);
       if ($("previewHint")) $("previewHint").textContent = "預覽失敗：" + (err.message || err);
@@ -6399,6 +6566,127 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     const m = num($(`${which}MinInput`) && $(`${which}MinInput`).value, 0);
     const s = num($(`${which}SecInput`) && $(`${which}SecInput`).value, 0);
     return Math.max(0, m * 60 + s);
+  }
+
+  function suggestPaperCrop(canvas) {
+    if (!canvas || canvas.width < 40 || canvas.height < 40) return null;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return null;
+    const w = canvas.width;
+    const h = canvas.height;
+    const data = ctx.getImageData(0, 0, w, h).data;
+    const rowScore = new Float32Array(h);
+    for (let y = 0; y < h; y += 1) {
+      let paper = 0;
+      let n = 0;
+      for (let x = 0; x < w; x += 4) {
+        const i = (y * w + x) * 4;
+        const r = data[i];
+        const g = data[i + 1];
+        const b = data[i + 2];
+        const mx = Math.max(r, g, b);
+        const mn = Math.min(r, g, b);
+        const lum = (r + g + b) / 3;
+        const sat = mx ? (mx - mn) / mx : 0;
+        if (lum > 175 && sat < 0.28) paper += 1;
+        n += 1;
+      }
+      rowScore[y] = n ? paper / n : 0;
+    }
+    let best = null;
+    let start = -1;
+    for (let y = 0; y <= h; y += 1) {
+      const on = y < h && rowScore[y] > 0.55;
+      if (on && start < 0) start = y;
+      if (!on && start >= 0) {
+        if (!best || y - start > best[1] - best[0]) best = [start, y];
+        start = -1;
+      }
+    }
+    if (!best || best[1] - best[0] < h * 0.08) return null;
+    const y0 = best[0];
+    const y1 = best[1];
+    let x0 = w;
+    let x1 = 0;
+    for (let y = y0; y < y1; y += 2) {
+      for (let x = 0; x < w; x += 4) {
+        const i = (y * w + x) * 4;
+        const lum = (data[i] + data[i + 1] + data[i + 2]) / 3;
+        if (lum > 175 && x < x0) x0 = x;
+        if (lum > 175 && x > x1) x1 = x;
+      }
+    }
+    if (x1 <= x0) return null;
+    const padY = Math.round((y1 - y0) * 0.04);
+    const padX = Math.round(w * 0.01);
+    return {
+      l: clamp((x0 - padX) / w, 0, 0.9),
+      r: clamp((x1 + padX) / w, 0.1, 1),
+      t: clamp((y0 - padY) / h, 0, 0.9),
+      b: clamp((y1 + padY) / h, 0.1, 1),
+    };
+  }
+
+  function paintCropBox() {
+    const box = $("cropBox");
+    const canvas = $("previewCanvas");
+    if (!box || !canvas) return;
+    const crop = state.params2.crop || { l: 0, r: 1, t: 0, b: 1 };
+    const full = crop.l <= 0.002 && crop.t <= 0.002 && crop.r >= 0.998 && crop.b >= 0.998;
+    if (full) {
+      box.hidden = true;
+      return;
+    }
+    box.hidden = false;
+    box.style.left = `${crop.l * 100}%`;
+    box.style.top = `${crop.t * 100}%`;
+    box.style.width = `${Math.max(1, (crop.r - crop.l) * 100)}%`;
+    box.style.height = `${Math.max(1, (crop.b - crop.t) * 100)}%`;
+  }
+
+  function wireCropBox() {
+    const stage = $("previewStage");
+    const canvas = $("previewCanvas");
+    if (!stage || !canvas || stage.dataset.wired === "1") return;
+    stage.dataset.wired = "1";
+    let dragging = false;
+    const point = (event) => {
+      const rect = canvas.getBoundingClientRect();
+      const x = clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+      const y = clamp((event.clientY - rect.top) / Math.max(1, rect.height), 0, 1);
+      return { x, y };
+    };
+    const apply = (a, b) => {
+      const l = Math.min(a.x, b.x);
+      const r = Math.max(a.x, b.x);
+      const t = Math.min(a.y, b.y);
+      const btm = Math.max(a.y, b.y);
+      if (r - l < 0.02 || btm - t < 0.02) return;
+      state.params2.cropTouched = true;
+      state.params2.crop = { l, r, t, b: btm };
+      syncStep2Inputs();
+      paintCropBox();
+    };
+    let start = null;
+    stage.addEventListener("pointerdown", (event) => {
+      if (!state.source) return;
+      dragging = true;
+      start = point(event);
+      stage.setPointerCapture(event.pointerId);
+      event.preventDefault();
+    });
+    stage.addEventListener("pointermove", (event) => {
+      if (!dragging || !start) return;
+      apply(start, point(event));
+    });
+    const end = (event) => {
+      if (!dragging || !start) return;
+      apply(start, point(event));
+      dragging = false;
+      start = null;
+    };
+    stage.addEventListener("pointerup", end);
+    stage.addEventListener("pointercancel", end);
   }
 
   function updateRangeLabels() {
@@ -6469,13 +6757,24 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       if (!frames.length) throw new Error("沒有取到任何畫面，請調整範圍或參數。");
 
       let kept = frames;
-      if (frames.length > 1) {
+      if (frames.length > 1 && source.kind === "video" && window.TabCapCapture.settlePages) {
+        setProgress(progress, 0, "正在等翻頁停穩、去掉過渡幀…");
+        const settled = window.TabCapCapture.settlePages(frames, p, {
+          onProgress: ({ done, total }) => setProgress(progress, total ? done / total : 0, `翻頁判定 ${done}/${total}`),
+        });
+        kept = settled.kept && settled.kept.length ? settled.kept : frames;
+        if (kept.length > 1) {
+          const result = window.TabCapCapture.dedupe(kept, p, {});
+          if (result.kept && result.kept.length) kept = result.kept;
+        }
+      } else if (frames.length > 1) {
         setProgress(progress, 0, "正在去重…");
         const result = window.TabCapCapture.dedupe(frames, p, {
           onProgress: ({ done, total }) => setProgress(progress, total ? done / total : 0, `去重 ${done}/${total}`),
         });
         kept = result.kept && result.kept.length ? result.kept : frames;
       }
+      kept = kept.map((frame) => ({ ...frame, canvas: trimWhitespace(frame.canvas) }));
 
       setProgress(progress, 1, "整理截圖…");
       const captures = [];
@@ -6497,21 +6796,6 @@ https://github.com/nodeca/pako/blob/main/LICENSE
         });
       }
       state.captures = captures;
-      state.params2.crop = { l: 0, r: 1, t: 0, b: 1 };
-
-      // 進入第 3 步前先自動偵測小節線（失敗不影響流程）。
-      if (window.TabCapImage && window.TabCapImage.detectMeasures) {
-        for (let i = 0; i < captures.length; i += 1) {
-          setProgress(progress, i / captures.length, `偵測小節線 ${i + 1}/${captures.length}`);
-          try {
-            const cropped = window.TabCapImage.cropCanvas(captures[i]._canvas, captures[i].crop);
-            captures[i].measures = window.TabCapImage.detectMeasures(cropped) || [];
-          } catch (_) {
-            captures[i].measures = [];
-          }
-          if (i % 3 === 2) await new Promise((r) => setTimeout(r));
-        }
-      }
 
       setStage(3);
       renderCards();
@@ -6575,9 +6859,6 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     const img = el("img", { className: "thumb", alt: "截圖預覽" });
     const thumbWrap = el("div", { className: "thumb-wrap" }, [img]);
 
-    const measuresLayer = el("div", { className: "measures-layer", title: "點擊圖片可新增小節線" });
-    thumbWrap.appendChild(measuresLayer);
-
     // 裁切滑桿
     const sliders = el("div", { className: "crop-grid" });
     const mkRange = (key, label) => {
@@ -6617,48 +6898,10 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       try { URL.revokeObjectURL(cap.url); } catch (_) {}
       await renderCards();
     });
-    const measureBtn = el("button", { type: "button", className: "secondary-button auto-measure-btn" }, "重偵測小節線");
-    measureBtn.addEventListener("click", async () => {
-      try {
-        const canvas = await captureCanvas(cap);
-        const cropped = window.TabCapImage.cropCanvas(canvas, cap.crop);
-        cap.measures = window.TabCapImage.detectMeasures(cropped) || [];
-        drawMeasures(measuresLayer, cap);
-      } catch (err) {
-        toast(err.message || "小節線偵測失敗。", "error");
-      }
-    });
-    actions.append(hideBtn, measureBtn, delBtn);
+    actions.append(hideBtn, delBtn);
 
-    card.append(head, thumbWrap);
-    if (cap.measures && cap.measures.length) {
-      const barInfo = el("div", { className: "measure-count" }, `小節線：${cap.measures.length}`);
-      card.appendChild(barInfo);
-    }
-    card.append(sliders, actions);
-
-    thumbWrap.addEventListener("click", async (event) => {
-      if (!window.TabCapImage) return;
-      const rect = thumbWrap.getBoundingClientRect();
-      const ratio = clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
-      let croppedCan = null;
-      try {
-        const canvas = await captureCanvas(cap);
-        croppedCan = window.TabCapImage.cropCanvas(canvas, cap.crop);
-      } catch (err) {
-        console.error(err);
-      }
-      if (!croppedCan) return;
-      // 點在既有小節線附近 → 移除；否則新增
-      const threshold = 0.02;
-      const existing = (cap.measures || []).findIndex((m) => Math.abs(m - ratio) < threshold);
-      if (existing >= 0) cap.measures.splice(existing, 1);
-      else cap.measures = [...(cap.measures || []), ratio].sort((a, b) => a - b);
-      drawMeasures(measuresLayer, cap);
-    });
-
+    card.append(head, thumbWrap, sliders, actions);
     refreshCardThumb(card, cap);
-    drawMeasures(measuresLayer, cap);
     return card;
   }
 
@@ -6878,6 +7121,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
 
   // ---------------------------------------------------------------- 事件綁定
   function bindEvents() {
+    wireCropBox();
     // 第 1 步
     const drop = $("dropZone");
     const fileInput = $("fileInput");
@@ -6925,10 +7169,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       if (node) node.addEventListener("input", () => {
         updateRangeLabels();
         readStep2FromUI();
-        clearTimeout(node._previewTimer);
-        node._previewTimer = setTimeout(() => {
-          if (state.source && state.source.kind !== "screen") renderPreview(state.params2.start);
-        }, 200);
+        paintCropBox();
       });
     });
     if ($("generateButton")) $("generateButton").addEventListener("click", generateCaptures);
@@ -6941,22 +7182,6 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       scheduleLayout();
     });
     if ($("showHiddenCheckbox")) $("showHiddenCheckbox").addEventListener("change", () => renderCards());
-    if ($("autoMeasuresButton")) $("autoMeasuresButton").addEventListener("click", async () => {
-      setBusy($("autoMeasuresButton"), true, "偵測中…");
-      try {
-        for (const cap of state.captures) {
-          const canvas = await captureCanvas(cap);
-          const cropped = window.TabCapImage.cropCanvas(canvas, cap.crop);
-          cap.measures = window.TabCapImage.detectMeasures(cropped) || [];
-        }
-        await renderCards();
-        toast("小節線偵測完成。", "success");
-      } catch (err) {
-        toast(err.message || "小節線偵測失敗。", "error");
-      } finally {
-        setBusy($("autoMeasuresButton"), false);
-      }
-    });
 
     // 第 4 步：任何調整都重排
     ["marginInput", "spacingInput", "scaleInput", "alignSelect", "valignSelect",
